@@ -1,0 +1,10 @@
+#!/bin/bash -l
+#SBATCH --time=6:00:00
+#SBATCH --mail-type=END
+#SBATCH --mail-user=rjackson@anl.gov
+#SBATCH --nodes=1
+
+cd /lcrc/group/earthscience/rjackson/earnest/scripts
+mamba activate pyart_bebop
+python dealias_data.py KDMX
+
