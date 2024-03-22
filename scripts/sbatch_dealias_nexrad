@@ -5,6 +5,6 @@
 #SBATCH --nodes=1
 
 cd /lcrc/group/earthscience/rjackson/earnest/scripts
-mamba activate pyart_bebop
-python dealias_data.py KDMX
+mamba activate pydda_env
+python dealias_data.py KOAX
 
