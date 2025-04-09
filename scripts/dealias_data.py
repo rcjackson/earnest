@@ -9,10 +9,11 @@ import cartopy.crs as ccrs
 import unravel
 
 from distributed import Client, wait
-from dask_jobqueue import SLURMCluster
+from dask_jobqueue import PBSCluster
 from scipy.spatial import KDTree
 
 radar = sys.argv[1]
+date = sys.argv[2]
 out_plot_path = os.path.join(
     '/lcrc/group/earthscience/rjackson/Earnest/quicklooks_dealias/', radar)
 rad_path = os.path.join(
@@ -26,7 +27,11 @@ if not os.path.exists(out_proc_path):
 if not os.path.exists(out_plot_path):
     os.makedirs(out_plot_path)
 
-def make_quicklooks(file):    
+def make_quicklooks(file):  
+    base, name = os.path.split(file)
+
+    if os.path.exists(os.path.join(out_proc_path, name)):
+        return
     try:
         rad_dest = pyart.io.read(file)
     except TypeError:
@@ -34,15 +39,15 @@ def make_quicklooks(file):
     base, name = os.path.split(file)
     disp = pyart.graph.RadarMapDisplay(rad_dest)
     gatefilter = pyart.filters.GateFilter(rad_dest)
-
-    gatefilter.exclude_below('cross_correlation_ratio', 0.95)
+    if "cross_correlation_ratio" in rad_dest.fields.keys():
+        gatefilter.exclude_below('cross_correlation_ratio', 0.95)
     gatefilter.exclude_invalid('reflectivity')
 
     gatefilter = pyart.correct.despeckle_field(
         rad_dest, 'velocity', gatefilter=gatefilter, size=25)
     corrected_velocity = pyart.correct.dealias_region_based(
             rad_dest, gatefilter=gatefilter, centered=True,
-            skip_between_rays=100, skip_along_rays=1000)
+            skip_between_rays=0)
 
     rad_dest.add_field('corrected_velocity_region_based', corrected_velocity, replace_existing=True)
     
@@ -84,8 +89,9 @@ def make_quicklooks(file):
     print("Quicklooks/Dealiasing for %s completed!" % file)
 
 if __name__ == "__main__":
-    file_list = sorted(glob.glob(rad_path + '/*'))
-    cluster = SLURMCluster(processes=6, cores=36, memory='128GB', walltime='6:00:00')
+    file_list = sorted(glob.glob(rad_path + f'/{radar}{date}_*'))
+    cluster = PBSCluster(processes=6, cores=36, memory='128GB', walltime='6:00:00',
+            account="rainfall")
     cluster.scale(24)
     with Client(cluster) as c:
         c.wait_for_workers(6)
