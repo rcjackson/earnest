@@ -10,8 +10,8 @@ from distributed import Client, LocalCluster, wait
 
 
 radar = sys.argv[1]
-out_path = os.path.join('/lcrc/group/earthscience/rjackson/Earnest/quicklooks', radar)
-rad_path = os.path.join('/lcrc/group/earthscience/rjackson/Earnest/', radar)
+out_path = os.path.join('/projects/storm/rjackson/wfip3/nexrad/quicklooks', radar)
+rad_path = os.path.join('/projects/storm/rjackson/wfip3/cfradial/', radar)
 
 if not os.path.exists(out_path):
     os.makedirs(out_path)
@@ -28,7 +28,7 @@ def make_quicklooks(file):
     rad.info()
     disp.plot_ppi_map('reflectivity', sweep=0, cmap='ChaseSpectral',
                       vmin=-20, vmax=80, ax=ax[0, 0])
-    disp.plot_ppi_map('velocity', sweep=1, cmap='balance',
+    disp.plot_ppi_map('velocity', sweep=0, cmap='balance',
                       vmin=-50, vmax=50, ax=ax[1, 0])
     disp.plot_ppi_map('differential_phase', sweep=0, cmap='ChaseSpectral',
                       vmin=0, vmax=10, ax=ax[0, 1])
@@ -37,8 +37,8 @@ def make_quicklooks(file):
                       vmin=0, vmax=1, ax=ax[1, 1])
     for i in range(0, 2):
         for j in range(2):
-            ax[i, j].set_xlim([-97, -90])
-            ax[i, j].set_ylim([40, 44])
+            ax[i, j].set_xlim([-75.5, -68.5])
+            ax[i, j].set_ylim([39.0, 44.5])
     fig.savefig(os.path.join(out_path, name + '.png'), dpi=150, bbox_inches='tight')
     plt.close(fig)
     del fig

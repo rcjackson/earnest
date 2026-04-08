@@ -1,9 +1,18 @@
 #!/bin/bash -l
-#SBATCH --time=10:00:00
+#SBATCH --time=3:00:00
 #SBATCH --mail-type=END
 #SBATCH --mail-user=rjackson@anl.gov
 #SBATCH --nodes=1
+#SBATCH -A storm
 
-cd /lcrc/group/earthscience/rjackson/earnest/scripts
-mamba activate pydda_env
-python make_gridded_product.py KARX
+cd /projects/storm/rjackson/earnest/scripts
+conda activate pydda_env
+python dealias_data.py KOKX 20240919
+python dealias_data.py KOKX 20240920
+python dealias_data.py KOKX 20240921
+python dealias_data.py KOKX 20240923
+python dealias_data.py KBOX 20240919 
+python dealias_data.py KBOX 20240920 
+python dealias_data.py KBOX 20240921 
+python dealias_data.py KBOX 20240923
+

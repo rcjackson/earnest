@@ -6,18 +6,16 @@ import sys
 import os
 import numpy as np
 import cartopy.crs as ccrs
-import unravel
 
-from distributed import Client, wait
-from dask_jobqueue import PBSCluster
+from distributed import Client, wait, LocalCluster
 from scipy.spatial import KDTree
 
-radar = sys.argv[1]
-date = sys.argv[2]
+radar = sys.argv[2]
+date = sys.argv[1]
 rad_path = os.path.join(
-    '/lcrc/group/earthscience/rjackson/Earnest/', radar)
+    '/projects/storm/rjackson/wfip3/nexrad/', radar)
 out_proc_path = os.path.join(
-    '/lcrc/group/earthscience/rjackson/Earnest/pre_processed/', radar)
+    '/projects/storm/rjackson/wfip3/cfradial/', radar)
 
 if not os.path.exists(out_proc_path):
     os.makedirs(out_proc_path)
@@ -53,35 +51,36 @@ def make_quicklooks(file):
         for cand_sweep in np.argwhere(
             np.isclose(rad.fixed_angle['data'], rad.fixed_angle['data'][sweep])):
             sl = rad.get_slice(cand_sweep)
+            print(f"Slice start: {sl.start} slice end: {sl.stop}")
+            sl_start = int(sl.start[0])
+            sl_end = int(sl.stop[0])
             sum_ref = np.ma.sum(
                 rad.fields['velocity']['data'][
-                    int(sl.start):int(sl.stop), :])
+                    sl_start:sl_end, :])
             src_slice = rad.get_slice(sweep)
             if not np.ma.is_masked(sum_ref) and (sl.stop - sl.start) == (src_slice.stop - src_slice.start):
                 break
         dest_slice = rad_dest.get_slice(i)
         dest_azi = rad_dest.azimuth['data'][dest_slice.start:dest_slice.stop]
-        src_azi = rad.azimuth['data'][int(sl.start):int(sl.stop)]
+        src_azi = rad.azimuth['data'][int(sl.start[0]):int(sl.stop[0])]
         tree = KDTree(dest_azi[:, np.newaxis])
         neighbors, indices = tree.query(
             src_azi[:, np.newaxis], distance_upper_bound=1)
         for field in fields_needed:
             if field in rad.fields.keys():
                 offset = min([dest_slice.start, dest_slice.stop])
-                rad_dest.fields[field]['data'][indices + offset, :] = rad.fields[field]['data'][int(sl.start):int(sl.stop), :]
+                rad_dest.fields[field]['data'][indices + offset, :] = rad.fields[field]['data'][int(sl.start[0]):int(sl.stop[0]), :]
+                
 
     pyart.io.write_cfradial(os.path.join(out_proc_path, name + '.nc'), rad_dest)
-    del fig
     print("Preprocessing for %s completed!" % file)
 
 if __name__ == "__main__":
     file_list = sorted(glob.glob(rad_path + f"/{radar}{date}*"))
     print(rad_path + f"/{radar}{date}*")
     print(file_list)
-    cluster = PBSCluster(processes=6, cores=36, memory='128GB', walltime='6:00:00',
-            account="rainfall") 
-    cluster.scale(24)
-    with Client(cluster) as c:
+    #make_quicklooks(file_list[0])
+    with Client(LocalCluster(n_workers=16, threads_per_worker=1)) as c:
         c.wait_for_workers(6)
         results = c.map(make_quicklooks, file_list)
         wait(results)

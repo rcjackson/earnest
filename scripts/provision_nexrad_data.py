@@ -2,7 +2,7 @@ import nexradaws
 import sys
 import os
 
-out_path = '/lcrc/group/earthscience/rjackson/Earnest'
+out_path = '/projects/storm/rjackson/wfip3/nexrad/'
 
 conn = nexradaws.NexradAwsInterface()
 date_str = sys.argv[1]

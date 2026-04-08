@@ -8,18 +8,20 @@ import numpy as np
 import cartopy.crs as ccrs
 import unravel
 
-from distributed import Client, wait
-from dask_jobqueue import PBSCluster
+from distributed import Client, wait, LocalCluster
 from scipy.spatial import KDTree
+from scipy.signal import medfilt
 
 radar = sys.argv[1]
 date = sys.argv[2]
+filter_size = int(sys.argv[3])
+
 out_plot_path = os.path.join(
-    '/lcrc/group/earthscience/rjackson/Earnest/quicklooks_dealias/', radar)
+    f'/projects/storm/rjackson/wfip3/nexrad/velocity_quicklooks/filter{filter_size}x{filter_size}/', radar)
 rad_path = os.path.join(
-    '/lcrc/group/earthscience/rjackson/Earnest/pre_processed/', radar)
+    '/projects/storm/rjackson/wfip3/cfradial/', radar)
 out_proc_path = os.path.join(
-    '/lcrc/group/earthscience/rjackson/Earnest/processed/', radar)
+    f'/projects/storm/rjackson/wfip3/nexrad/nexrad_dealiased/filter{filter_size}x{filter_size}/', radar)
 
 if not os.path.exists(out_proc_path):
     os.makedirs(out_proc_path)
@@ -39,9 +41,6 @@ def make_quicklooks(file):
     base, name = os.path.split(file)
     disp = pyart.graph.RadarMapDisplay(rad_dest)
     gatefilter = pyart.filters.GateFilter(rad_dest)
-    if "cross_correlation_ratio" in rad_dest.fields.keys():
-        gatefilter.exclude_below('cross_correlation_ratio', 0.95)
-    gatefilter.exclude_invalid('reflectivity')
 
     gatefilter = pyart.correct.despeckle_field(
         rad_dest, 'velocity', gatefilter=gatefilter, size=25)
@@ -57,11 +56,18 @@ def make_quicklooks(file):
     rad_dest.add_field_like('velocity', 'corrected_velocity_unravel',
         dealiased_velocity, replace_existing=True)
     num_rows = int(np.ceil(rad_dest.nsweeps/2))
+    if filter_size > 0:
+        for sweep in rad_dest.iter_slice():
+            rad_dest.fields['corrected_velocity_region_based']['data'][sweep, :] = medfilt(
+                    rad_dest.fields['corrected_velocity_unravel']['data'][sweep, :], filter_size)
+            rad_dest.fields['corrected_velocity_unravel']['data'][sweep, :] = medfilt(
+                    rad_dest.fields['corrected_velocity_unravel']['data'][sweep, :], filter_size)
+
     fig, ax = plt.subplots(num_rows, 4, figsize=(16, num_rows*3))
     for i in range(rad_dest.nsweeps):
         disp.plot_ppi('corrected_velocity_region_based', i, ax=ax[int(i / 2), i % 2],
                  vmin=-70, vmax=70,
-                 cmap='pyart_balance', colorbar_label='Region Doppler velocity [m/s]')
+                 cmap='balance', colorbar_label='Region Doppler velocity [m/s]')
         ax[int(i / 2), i % 2].set_xlim([-150, 150])
         ax[int(i / 2), i % 2].set_ylim([-150, 150])
         ax[int(i / 2), i % 2].set_xlabel('X [km]')
@@ -70,7 +76,7 @@ def make_quicklooks(file):
         ax[int(i / 2), i % 2].set_title(title_split[0])
         disp.plot_ppi('corrected_velocity_unravel', i, ax=ax[int(i / 2), (i % 2) + 2],
                  vmin=-70, vmax=70,
-                 cmap='pyart_balance', colorbar_label='UNRAVEL Doppler velocity [m/s]')
+                 cmap='balance', colorbar_label='UNRAVEL Doppler velocity [m/s]')
         ax[int(i / 2), (i % 2) + 2].set_xlim([-150, 150])
         ax[int(i / 2), (i % 2) + 2].set_ylim([-150, 150])
         ax[int(i / 2), (i % 2) + 2].set_xlabel('X [km]')
@@ -90,10 +96,9 @@ def make_quicklooks(file):
 
 if __name__ == "__main__":
     file_list = sorted(glob.glob(rad_path + f'/{radar}{date}_*'))
-    cluster = PBSCluster(processes=6, cores=36, memory='128GB', walltime='6:00:00',
-            account="rainfall")
-    cluster.scale(24)
-    with Client(cluster) as c:
+    print(file_list)
+    print(rad_path)
+    with Client(LocalCluster(n_workers=24, threads_per_worker=1)) as c:
         c.wait_for_workers(6)
         results = c.map(make_quicklooks, file_list)
         wait(results)
