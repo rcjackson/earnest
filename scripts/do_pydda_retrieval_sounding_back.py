@@ -169,29 +169,32 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
     phaze_kbox = np.logical_and(dist_kbox > args.phaze_min, dist_kbox < args.phaze_max)
     weights_kbox[phaze_kbox] /= args.phaze_factor
 
-    # --- Sounding ---
-    print("Loading sounding")
-    sounding_file = find_sounding_file(args.sounding_dir, target_time)
-    print(f"  Sounding: {sounding_file}")
-    sounding = pd.read_csv(sounding_file)
-    u_wind = sounding["SPED"] * -np.sin(np.deg2rad(sounding["DRCT"]))
-    v_wind = sounding["SPED"] * -np.cos(np.deg2rad(sounding["DRCT"]))
-    z = sounding["HGHT"]
-    valid = np.isfinite(u_wind.values)
-    u_wind = u_wind[valid]
-    v_wind = v_wind[valid]
-    z = z[valid]
+    # --- Sounding and IEM observations ---
+    u_wind = v_wind = z = None
+    if not args.no_sounding:
+        print("Loading sounding")
+        sounding_file = find_sounding_file(args.sounding_dir, target_time)
+        print(f"  Sounding: {sounding_file}")
+        sounding = pd.read_csv(sounding_file)
+        u_wind = sounding["SPED"] * -np.sin(np.deg2rad(sounding["DRCT"]))
+        v_wind = sounding["SPED"] * -np.cos(np.deg2rad(sounding["DRCT"]))
+        z = sounding["HGHT"]
+        valid = np.isfinite(u_wind.values)
+        u_wind = u_wind[valid].values
+        v_wind = v_wind[valid].values
+        z = z[valid].values
 
-    # --- IEM observations (cached per time step) ---
-    time_str_cache = target_time.strftime('%Y%m%d_%H%M')
-    iem_cache_file = f'iem_obs_{time_str_cache}.pkl'
-    if not os.path.exists(iem_cache_file):
-        iem_obs = pydda.constraints.get_iem_obs(grid_kbox)
-        with open(iem_cache_file, 'wb') as p:
-            pickle.dump(iem_obs, p)
+        time_str_cache = target_time.strftime('%Y%m%d_%H%M')
+        iem_cache_file = f'iem_obs_{time_str_cache}.pkl'
+        if not os.path.exists(iem_cache_file):
+            iem_obs = pydda.constraints.get_iem_obs(grid_kbox)
+            with open(iem_cache_file, 'wb') as p:
+                pickle.dump(iem_obs, p)
+        else:
+            with open(iem_cache_file, 'rb') as p:
+                iem_obs = pickle.load(p)
     else:
-        with open(iem_cache_file, 'rb') as p:
-            iem_obs = pickle.load(p)
+        print("Skipping sounding and IEM obs (--no_sounding)")
 
     # --- HRRR background ---
     # Round retrieval time down to the nearest hour for a valid HRRR output time,
@@ -222,7 +225,7 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
             grids,
             vel_name='corrected_velocity_unravel',
             Co=args.Co, Cm=args.Cm, engine="jax", mask_outside_opt=False,
-            u_back=u_wind.values, v_back=v_wind.values, z_back=z.values,
+            u_back=u_wind, v_back=v_wind, z_back=z,
             model_fields=["hrrr"],
             Cmod=args.Cb, tolerance=args.tolerance, max_iterations=args.filter_iterations,
             Cx=args.Cx, Cy=args.Cy, Cz=args.Cz, low_pass_filter=False,
@@ -321,6 +324,8 @@ if __name__ == "__main__":
                         help=f'Directory of sounding CSV files (default: {sounding_dir_default})')
     parser.add_argument('--radar_tolerance', type=int, default=15,
                         help='Max minutes between target time and radar file timestamp (default: 15)')
+    parser.add_argument('--no_sounding', action='store_true',
+                        help='Skip sounding CSV and IEM obs downloads; use only HRRR as background')
 
     # Retrieval weights
     parser.add_argument('--Co', type=float, default=8.0,
