@@ -245,12 +245,22 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
     grids[0]["spd"].attrs["long_name"] = "Wind speed"
     grids[0]["spd"].attrs["units"] = 'm s-1'
 
+    retrieval_attrs = {
+        "Co": args.Co, "Cm": args.Cm, "Cb": args.Cb,
+        "Cx": args.Cx, "Cy": args.Cy, "Cz": args.Cz,
+        "Cp": args.Cp, "tolerance": args.tolerance,
+        "max_iterations": args.max_iterations,
+        "filter_iterations": args.filter_iterations,
+        "kernel_size": args.kernel_size,
+        "hrrr_fxx": args.fxx,
+        "no_sounding": int(args.no_sounding),
+    }
+
     # --- Save grids ---
     for i, g in enumerate(grids):
         del g["time"].attrs["units"]
-        out_file = os.path.join(
-            args.output_dir,
-            f"grid_{time_str}_{args.Co}_{args.Cm}_{args.Cb}_{args.Cx}_{args.Cy}_{args.Cz}_{i}.nc")
+        g.attrs.update(retrieval_attrs)
+        out_file = os.path.join(args.output_dir, f"grid_{time_str}_{i}.nc")
         g.to_netcdf(out_file)
         print(f"Saved grid: {out_file}")
 
@@ -270,9 +280,7 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
         plt.clabel(c)
     fig.suptitle(f'Retrieved winds — {time_str} UTC', fontsize=13)
     plt.tight_layout()
-    ql_file = os.path.join(
-        args.quicklook_dir,
-        f"quicklook_{time_str}_{args.Co}_{args.Cm}_{args.Cb}_{args.Cx}_{args.Cy}_{args.Cz}_{args.filter_iterations}.png")
+    ql_file = os.path.join(args.quicklook_dir, f"quicklook_{time_str}.png")
     fig.savefig(ql_file, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"Saved quicklook: {ql_file}")
@@ -290,9 +298,7 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
         plt.clabel(c)
     fig.suptitle(f'Retrieved winds — {time_str} UTC', fontsize=13)
     plt.tight_layout()
-    ql_file = os.path.join(
-        args.quicklook_dir,
-        f"quicklook_{time_str}_{args.Co}_{args.Cm}_{args.Cb}_{args.Cx}_{args.Cy}_{args.Cz}_{args.filter_iterations}_spd.png")
+    ql_file = os.path.join(args.quicklook_dir, f"quicklook_{time_str}_spd.png")
     fig.savefig(ql_file, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"Saved quicklook: {ql_file}")
