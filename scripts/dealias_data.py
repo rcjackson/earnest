@@ -45,14 +45,13 @@ def make_quicklooks(file):
     gatefilter = pyart.correct.despeckle_field(
         rad_dest, 'velocity', gatefilter=gatefilter, size=25)
     corrected_velocity = pyart.correct.dealias_region_based(
-            rad_dest, gatefilter=gatefilter, centered=True,
+            rad_dest, centered=True,
             skip_between_rays=0)
 
     rad_dest.add_field('corrected_velocity_region_based', corrected_velocity, replace_existing=True)
     
     dealiased_velocity = unravel.unravel_3D_pyart(
-        rad_dest, velname='velocity', dbzname='reflectivity', do_3d=True,
-        gatefilter=gatefilter)
+        rad_dest, velname='velocity', dbzname='reflectivity', do_3d=True)
     rad_dest.add_field_like('velocity', 'corrected_velocity_unravel',
         dealiased_velocity, replace_existing=True)
     num_rows = int(np.ceil(rad_dest.nsweeps/2))

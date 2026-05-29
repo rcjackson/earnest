@@ -21,8 +21,8 @@ from herbie import Herbie
 
 grid_out_path = '/projects/storm/rjackson/wfip3/multidoppler_grids/grids'
 quicklook_out_path = '/projects/storm/rjackson/wfip3/multidoppler_grids/quicklooks'
-kbox_dir_default = '/projects/storm/rjackson/wfip3/nexrad/nexrad_dealiased/filter3x3/KBOX'
-kokx_dir_default = '/projects/storm/rjackson/wfip3/nexrad/nexrad_dealiased/KOKX'
+kbox_dir_default = '/projects/storm/rjackson/wfip3/nexrad/nexrad_dealiased/filter0x0/KBOX'
+kokx_dir_default = '/projects/storm/rjackson/wfip3/nexrad/nexrad_dealiased/filter0x0/KOKX'
 sounding_dir_default = '/projects/storm/rjackson/wfip3/soundings'
 
 
@@ -103,8 +103,10 @@ def make_grid(radar, origin_latitude, origin_longitude, origin_altitude,
         gatefilters=[gatefilter],
         grid_origin=(origin_latitude, origin_longitude),
         grid_origin_alt=origin_altitude,
-        roi_func='constant',
-        constant_roi=1000.,
+        roi_func='dist_beam',
+        min_radius=500.,
+        z_factor=0.01,
+        xy_factor=0.008,
         weighting_function='Cressman')
     for field in ('velocity', 'corrected_velocity_unravel', 'corrected_velocity_region_based'):
         g.fields[field]['data'] = np.ma.masked_where(
@@ -205,7 +207,7 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
           f"(valid ~{hrrr_valid_time.strftime('%H:%M')} UTC)")
     H = Herbie(hrrr_run_time.strftime('%Y-%m-%d %H:%M'), model="hrrr", product="prs", fxx=args.fxx)
     H.download()
-
+    
     grid_kbox = pydda.constraints.add_hrrr_constraint_to_grid(grid_kbox, H.grib)
     grid_kbox["u"] = grid_kbox["U_hrrr"]
     grid_kbox["v"] = grid_kbox["V_hrrr"]
@@ -225,8 +227,8 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
             grids,
             vel_name='corrected_velocity_unravel',
             Co=args.Co, Cm=args.Cm, engine="jax", mask_outside_opt=False,
-            u_back=u_wind, v_back=v_wind, z_back=z,
-            model_fields=["hrrr"],
+            u_back=u_wind, v_back=v_wind, z_back=z, frz=args.melting,
+            model_fields=["hrrr"], 
             Cmod=args.Cb, tolerance=args.tolerance, max_iterations=args.filter_iterations,
             Cx=args.Cx, Cy=args.Cy, Cz=args.Cz, low_pass_filter=False,
             weights_obs=[weights_kbox, weights_kokx], weights_model=[bg_weights])
@@ -364,7 +366,8 @@ if __name__ == "__main__":
                         help='Outer range of purple haze suppression (m, default: 150000)')
     parser.add_argument('--phaze_factor', type=float, default=2,
                         help='Purple haze weight suppression factor (default: 2)')
-
+    parser.add_argument('--melting', type=float, default=500.,
+            help="Melting layer height")
     # Output
     parser.add_argument('--output_dir', type=str, default=grid_out_path,
                         help=f'Output directory for retrieved grids (default: {grid_out_path})')
@@ -408,9 +411,9 @@ if __name__ == "__main__":
         except FileNotFoundError as e:
             print(f"SKIP — {e}")
             failed.append((target_time, str(e)))
-        except Exception as e:
-            print(f"ERROR at {target_time}: {e}")
-            failed.append((target_time, str(e)))
+        #except Exception as e:
+        #    print(f"ERROR at {target_time}: {e}")
+        #    failed.append((target_time, str(e)))
 
     print(f"\nDone. {len(time_steps) - len(failed)}/{len(time_steps)} time steps completed.")
     if failed:
