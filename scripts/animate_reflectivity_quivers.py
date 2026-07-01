@@ -178,15 +178,41 @@ def contour_field(name, data):
     return data.get(name)
 
 
+def lowpass_field(field, sigma):
+    """Gaussian low-pass filter a 2-D field, ignoring NaNs.
+
+    ``sigma`` is the Gaussian standard deviation in grid cells; a value of 0
+    (or None) returns the field unchanged. NaNs are handled with normalized
+    convolution so missing points neither contribute to nor bleed into their
+    neighbours, and points that were NaN stay NaN.
+    """
+    if not sigma or sigma <= 0:
+        return field
+    from scipy.ndimage import gaussian_filter
+
+    arr = np.asarray(field, dtype=float)
+    nan = ~np.isfinite(arr)
+    weight = (~nan).astype(float)
+    smoothed = gaussian_filter(np.where(nan, 0.0, arr), sigma=sigma,
+                               mode='nearest')
+    norm = gaussian_filter(weight, sigma=sigma, mode='nearest')
+    with np.errstate(invalid='ignore', divide='ignore'):
+        out = smoothed / norm
+    out[nan] = np.nan
+    return out
+
+
 def draw_contours(ax, xc, yc, data, contour_vars, contour_levels,
-                  transform=None, valid_mask=None):
+                  transform=None, valid_mask=None, contour_smooth=0):
     """Overlay line contours of the requested wind components.
 
     ``xc``/``yc`` are the contour coordinate arrays (1-D x/y km, or 2-D lon/lat
     when ``transform`` is a cartopy CRS). ``valid_mask`` is an optional boolean
     array (True where valid); contours are restricted to those points so they
-    are only drawn over regions with valid reflectivity echoes. Returns a list
-    of (label, Line2D-proxy) legend handles for the components actually drawn.
+    are only drawn over regions with valid reflectivity echoes. When
+    ``contour_smooth`` > 0 each field is Gaussian low-pass filtered (sigma in
+    grid cells) before contouring. Returns a list of (label, Line2D-proxy)
+    legend handles for the components actually drawn.
     """
     from matplotlib.lines import Line2D
 
@@ -196,6 +222,7 @@ def draw_contours(ax, xc, yc, data, contour_vars, contour_levels,
         field = contour_field(name, data)
         if field is None or not np.any(np.isfinite(field)):
             continue
+        field = lowpass_field(field, contour_smooth)
         masked = np.ma.masked_invalid(field)
         if valid_mask is not None:
             masked = np.ma.masked_where(~valid_mask, masked)
@@ -291,7 +318,7 @@ def label_states(ax, extent, scale):
 
 def draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
                quiver_spacing_km, quiver_scale, title,
-               contour_vars=(), contour_levels=None,
+               contour_vars=(), contour_levels=None, contour_smooth=0,
                use_map=False, map_scale='50m', show_sites=True):
     """Render one frame in-place on the provided axes.
 
@@ -347,7 +374,7 @@ def draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
     contour_y = Y if use_map else data['y_km']
     handles = draw_contours(ax, contour_x, contour_y, data, contour_vars,
                             contour_levels, transform=transform,
-                            valid_mask=valid)
+                            valid_mask=valid, contour_smooth=contour_smooth)
     if handles:
         ax.legend(handles=handles, loc='upper right', fontsize=8,
                   framealpha=0.85)
@@ -375,8 +402,8 @@ def draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
 def build_animation(timestamps, files_a, files_b, level, refl_name, u_name,
                     v_name, w_name, vmin, vmax, cmap, quiver_spacing_km,
                     quiver_scale, contour_vars, contour_levels,
-                    figsize, dpi, fps, output, use_map=False, map_scale='50m',
-                    show_sites=True):
+                    figsize, dpi, fps, output, contour_smooth=0,
+                    use_map=False, map_scale='50m', show_sites=True):
     subplot_kw = ({'projection': ccrs.PlateCarree()} if use_map else None)
     fig, ax = plt.subplots(figsize=figsize, subplot_kw=subplot_kw)
     fig.subplots_adjust(right=0.86)
@@ -397,6 +424,7 @@ def build_animation(timestamps, files_a, files_b, level, refl_name, u_name,
         draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
                    quiver_spacing_km, quiver_scale, title,
                    contour_vars=contour_vars, contour_levels=contour_levels,
+                   contour_smooth=contour_smooth,
                    use_map=use_map, map_scale=map_scale, show_sites=show_sites)
         print(f"  [{frame + 1}/{len(timestamps)}] {ts:%Y-%m-%d %H:%M}")
 
@@ -447,6 +475,12 @@ if __name__ == '__main__':
     parser.add_argument('--contour_levels', nargs='*', type=float, default=None,
                         help='Explicit contour levels in m/s (default: auto-'
                              'chosen by matplotlib)')
+    parser.add_argument('--contour_smooth', type=float, default=0.0,
+                        metavar='SIGMA',
+                        help='Apply a Gaussian low-pass filter to the contour '
+                             'fields before contouring; SIGMA is the standard '
+                             'deviation in grid cells (e.g. 1.5). NaNs are '
+                             'ignored. 0 disables smoothing (default: 0)')
     parser.add_argument('--vmin', type=float, default=-10.0,
                         help='Reflectivity colormap minimum dBZ (default: -10)')
     parser.add_argument('--vmax', type=float, default=40.0,
@@ -532,6 +566,7 @@ if __name__ == '__main__':
         quiver_scale=args.quiver_scale,
         contour_vars=args.contour,
         contour_levels=args.contour_levels,
+        contour_smooth=args.contour_smooth,
         figsize=tuple(args.figsize),
         dpi=args.dpi,
         fps=args.fps,
