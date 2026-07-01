@@ -35,6 +35,16 @@ reflectivity shading and quivers::
         --grid_dir /path/to/grids \
         --contour speed --contour_levels 10 20 30 \
         --output reflectivity_quivers_speed.gif
+
+By default the frame is drawn on a geographic map (using the grid's 2-D lon/lat
+coordinates) with ocean shading, coastline, country and state/province borders,
+and state/province name labels. Pass ``--no-map`` for the original radar-relative
+x/y-km plot, and ``--map_scale {10m,50m,110m}`` to pick the Natural Earth
+feature resolution::
+
+    python animate_reflectivity_quivers.py \
+        --grid_dir /path/to/grids --map_scale 10m \
+        --output reflectivity_quivers_map.gif
 """
 
 import argparse
@@ -46,9 +56,21 @@ from datetime import datetime
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.animation as animation
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+
+# Cartopy is only required for the geographic map overlay (--map). Import it
+# lazily-tolerantly so the plain x/y-km path still runs where it is unavailable.
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    from cartopy.io import shapereader
+    _HAVE_CARTOPY = True
+except Exception:
+    ccrs = cfeature = shapereader = None
+    _HAVE_CARTOPY = False
 
 
 GRID_FILENAME_RE = re.compile(r'grid_(\d{8}_\d{6})_(\d+)\.nc$')
@@ -104,6 +126,10 @@ def load_frame(path_a, path_b, level, refl_name, u_name, v_name, w_name):
         y_km = ds_a['y'].values * 1e-3
         z_m = float(ds_a['z'].values[level])
 
+        # 2-D geographic coordinates (degrees) for the map overlay.
+        lon2d = np.asarray(ds_a['lon'].values, dtype=float)
+        lat2d = np.asarray(ds_a['lat'].values, dtype=float)
+
         refl_a = np.asarray(ds_a[refl_name].isel(time=0, z=level).values, dtype=float)
         refl_b = np.asarray(ds_b[refl_name].isel(time=0, z=level).values, dtype=float)
         # Element-wise max; a valid value on either side beats a NaN.
@@ -114,7 +140,8 @@ def load_frame(path_a, path_b, level, refl_name, u_name, v_name, w_name):
         w = None
         if w_name in ds_a:
             w = np.asarray(ds_a[w_name].isel(time=0, z=level).values, dtype=float)
-        return dict(x_km=x_km, y_km=y_km, z_m=z_m, refl=refl, u=u, v=v, w=w)
+        return dict(x_km=x_km, y_km=y_km, lon2d=lon2d, lat2d=lat2d,
+                    z_m=z_m, refl=refl, u=u, v=v, w=w)
     finally:
         ds_a.close()
         ds_b.close()
@@ -151,14 +178,17 @@ def contour_field(name, data):
     return data.get(name)
 
 
-def draw_contours(ax, x_km, y_km, data, contour_vars, contour_levels):
+def draw_contours(ax, xc, yc, data, contour_vars, contour_levels,
+                  transform=None):
     """Overlay line contours of the requested wind components.
 
-    Returns a list of (label, Line2D-proxy) legend handles for the components
-    that were actually drawn.
+    ``xc``/``yc`` are the contour coordinate arrays (1-D x/y km, or 2-D lon/lat
+    when ``transform`` is a cartopy CRS). Returns a list of (label, Line2D-
+    proxy) legend handles for the components that were actually drawn.
     """
     from matplotlib.lines import Line2D
 
+    extra = {'transform': transform} if transform is not None else {}
     handles = []
     for name in contour_vars:
         field = contour_field(name, data)
@@ -166,29 +196,121 @@ def draw_contours(ax, x_km, y_km, data, contour_vars, contour_levels):
             continue
         style = CONTOUR_STYLE[name]
         cs = ax.contour(
-            x_km, y_km, np.ma.masked_invalid(field),
+            xc, yc, np.ma.masked_invalid(field),
             levels=contour_levels, colors=style['colors'],
-            linewidths=1.0)
+            linewidths=1.0, **extra)
         ax.clabel(cs, inline=True, fontsize=7, fmt='%.0f')
         handles.append(Line2D([0], [0], color=style['colors'],
                               lw=1.5, label=style['label']))
     return handles
 
 
+# Fixed observation sites to mark on the map (station code, name, lat N, lon E).
+# MVCO1 (South Beach) and MVCO2 (Shore Lab) are ~1 km apart, so they are shown
+# as a single "MVCO" marker at their midpoint.
+SITES = [
+    ('NANT', 'Nantucket', 41.242, -70.125),
+    ('MVCO', "Martha's Vineyard", 41.355, -70.526),
+    ('BLOC', 'Block Island', 41.168, -71.580),
+    ('RHOD', 'Narragansett', 41.445, -71.436),
+    ('CACO', 'Nausett', 42.03, -70.049),
+]
+
+
+def draw_sites(ax, extent):
+    """Plot the fixed observation sites (marker + station-code label).
+
+    Only sites whose lon/lat fall inside ``extent`` (lon_min, lon_max, lat_min,
+    lat_max) are drawn.
+    """
+    lon_min, lon_max, lat_min, lat_max = extent
+    for code, _name, lat, lon in SITES:
+        if not (lon_min <= lon <= lon_max and lat_min <= lat <= lat_max):
+            continue
+        ax.plot(lon, lat, marker='*', markersize=11, color='magenta',
+                markeredgecolor='black', markeredgewidth=0.6,
+                transform=ccrs.PlateCarree(), zorder=6)
+        txt = ax.text(lon, lat + 0.03, code, transform=ccrs.PlateCarree(),
+                      fontsize=7, fontweight='bold', ha='center', va='bottom',
+                      color='magenta', zorder=6)
+        txt.set_path_effects([
+            path_effects.Stroke(linewidth=1.5, foreground='white'),
+            path_effects.Normal()])
+
+
+def add_map_features(ax, scale):
+    """Add ocean/land shading, coastline, and country/state borders.
+
+    Re-added every frame because ``ax.clear()`` wipes them; Natural Earth data
+    is cached by cartopy after the first use so this stays cheap. ``scale`` is
+    a Natural Earth resolution ('10m', '50m', or '110m').
+    """
+    ax.add_feature(cfeature.OCEAN.with_scale(scale), zorder=0)
+    ax.add_feature(cfeature.LAND.with_scale(scale), zorder=0)
+    ax.add_feature(cfeature.LAKES.with_scale(scale), zorder=0, alpha=0.5)
+    ax.add_feature(cfeature.COASTLINE.with_scale(scale), linewidth=0.8)
+    ax.add_feature(cfeature.BORDERS.with_scale(scale), linewidth=0.8)
+    ax.add_feature(cfeature.STATES.with_scale(scale), linewidth=0.5,
+                   edgecolor='gray')
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, color='gray',
+                      alpha=0.4, linestyle='--')
+    gl.top_labels = False
+    gl.right_labels = False
+
+
+def label_states(ax, extent, scale):
+    """Label states/provinces whose center falls inside ``extent``.
+
+    ``extent`` is (lon_min, lon_max, lat_min, lat_max) in degrees. Names come
+    from the Natural Earth ``admin_1_states_provinces`` shapefile.
+    """
+    lon_min, lon_max, lat_min, lat_max = extent
+    shp = shapereader.natural_earth(
+        resolution=scale, category='cultural',
+        name='admin_1_states_provinces')
+    for rec in shapereader.Reader(shp).records():
+        name = rec.attributes.get('name') or rec.attributes.get('name_en')
+        if not name:
+            continue
+        pt = rec.geometry.representative_point()
+        if lon_min <= pt.x <= lon_max and lat_min <= pt.y <= lat_max:
+            txt = ax.text(pt.x, pt.y, name, transform=ccrs.PlateCarree(),
+                          fontsize=7, ha='center', va='center', color='black',
+                          zorder=5)
+            txt.set_path_effects([
+                path_effects.Stroke(linewidth=1.5, foreground='white'),
+                path_effects.Normal()])
+
+
 def draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
                quiver_spacing_km, quiver_scale, title,
-               contour_vars=(), contour_levels=None):
-    """Render one frame in-place on the provided axes."""
-    x_km = data['x_km']
-    y_km = data['y_km']
+               contour_vars=(), contour_levels=None,
+               use_map=False, map_scale='50m', show_sites=True):
+    """Render one frame in-place on the provided axes.
+
+    When ``use_map`` is True, ``ax`` must be a cartopy GeoAxes and the frame is
+    drawn in lon/lat (transform=PlateCarree) over ocean/land/border features.
+    Otherwise the frame is drawn in radar-relative x/y km.
+    """
     refl = data['refl']
     u = data['u']
     v = data['v']
 
-    dx_km = x_km[1] - x_km[0]
-    dy_km = y_km[1] - y_km[0]
-    sx, sy = quiver_stride(quiver_spacing_km, dx_km, dy_km)
-    X, Y = np.meshgrid(x_km, y_km)
+    if use_map:
+        lon2d = data['lon2d']
+        lat2d = data['lat2d']
+        # Stride from the mean grid spacing in km (x/y are regular).
+        dx_km = data['x_km'][1] - data['x_km'][0]
+        dy_km = data['y_km'][1] - data['y_km'][0]
+        sx, sy = quiver_stride(quiver_spacing_km, dx_km, dy_km)
+        X, Y = lon2d, lat2d
+    else:
+        x_km = data['x_km']
+        y_km = data['y_km']
+        dx_km = x_km[1] - x_km[0]
+        dy_km = y_km[1] - y_km[0]
+        sx, sy = quiver_stride(quiver_spacing_km, dx_km, dy_km)
+        X, Y = np.meshgrid(x_km, y_km)
 
     # Mask quivers to points with a valid combined reflectivity value.
     valid = np.isfinite(refl)
@@ -196,24 +318,45 @@ def draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
     qmask = valid[sub]
 
     ax.clear()
+
+    transform = None
+    if use_map:
+        transform = ccrs.PlateCarree()
+        add_map_features(ax, map_scale)
+
+    mesh_kw = {'transform': transform} if transform is not None else {}
     mesh = ax.pcolormesh(
-        x_km, y_km, np.ma.masked_invalid(refl),
-        cmap=cmap, vmin=vmin, vmax=vmax, shading='auto')
+        X if use_map else data['x_km'],
+        Y if use_map else data['y_km'],
+        np.ma.masked_invalid(refl),
+        cmap=cmap, vmin=vmin, vmax=vmax, shading='auto', **mesh_kw)
     ax.quiver(
         X[sub][qmask], Y[sub][qmask],
         u[sub][qmask], v[sub][qmask],
-        scale=quiver_scale, color='black', width=0.0022, pivot='middle')
+        scale=quiver_scale, color='black', width=0.0022, pivot='middle',
+        **mesh_kw)
 
-    handles = draw_contours(ax, x_km, y_km, data, contour_vars, contour_levels)
+    contour_x = X if use_map else data['x_km']
+    contour_y = Y if use_map else data['y_km']
+    handles = draw_contours(ax, contour_x, contour_y, data, contour_vars,
+                            contour_levels, transform=transform)
     if handles:
         ax.legend(handles=handles, loc='upper right', fontsize=8,
                   framealpha=0.85)
 
-    ax.set_aspect('equal')
-    ax.set_xlim(x_km[0], x_km[-1])
-    ax.set_ylim(y_km[0], y_km[-1])
-    ax.set_xlabel('X [km]')
-    ax.set_ylabel('Y [km]')
+    if use_map:
+        extent = [float(np.nanmin(lon2d)), float(np.nanmax(lon2d)),
+                  float(np.nanmin(lat2d)), float(np.nanmax(lat2d))]
+        ax.set_extent(extent, crs=ccrs.PlateCarree())
+        label_states(ax, extent, map_scale)
+        if show_sites:
+            draw_sites(ax, extent)
+    else:
+        ax.set_aspect('equal')
+        ax.set_xlim(x_km[0], x_km[-1])
+        ax.set_ylim(y_km[0], y_km[-1])
+        ax.set_xlabel('X [km]')
+        ax.set_ylabel('Y [km]')
     ax.set_title(title, fontsize=12)
 
     if cbar_ax is not None:
@@ -224,8 +367,10 @@ def draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
 def build_animation(timestamps, files_a, files_b, level, refl_name, u_name,
                     v_name, w_name, vmin, vmax, cmap, quiver_spacing_km,
                     quiver_scale, contour_vars, contour_levels,
-                    figsize, dpi, fps, output):
-    fig, ax = plt.subplots(figsize=figsize)
+                    figsize, dpi, fps, output, use_map=False, map_scale='50m',
+                    show_sites=True):
+    subplot_kw = ({'projection': ccrs.PlateCarree()} if use_map else None)
+    fig, ax = plt.subplots(figsize=figsize, subplot_kw=subplot_kw)
     fig.subplots_adjust(right=0.86)
     cbar_ax = fig.add_axes([0.88, 0.15, 0.02, 0.7])
 
@@ -243,7 +388,8 @@ def build_animation(timestamps, files_a, files_b, level, refl_name, u_name,
                  f'{ts:%Y-%m-%d %H:%M UTC}')
         draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
                    quiver_spacing_km, quiver_scale, title,
-                   contour_vars=contour_vars, contour_levels=contour_levels)
+                   contour_vars=contour_vars, contour_levels=contour_levels,
+                   use_map=use_map, map_scale=map_scale, show_sites=show_sites)
         print(f"  [{frame + 1}/{len(timestamps)}] {ts:%Y-%m-%d %H:%M}")
 
     anim = animation.FuncAnimation(
@@ -313,10 +459,31 @@ if __name__ == '__main__':
                         help='Output DPI (default: 120)')
     parser.add_argument('--figsize', type=float, nargs=2, default=[8.0, 7.0],
                         help='Figure size W H in inches (default: 8 7)')
+    parser.add_argument('--map', dest='map', action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help='Overlay data on a geographic map with coastline, '
+                             'country/state borders, ocean shading and '
+                             'state/province labels (default: on; use --no-map '
+                             'for the plain x/y-km plot)')
+    parser.add_argument('--map_scale', type=str, default='50m',
+                        choices=['10m', '50m', '110m'],
+                        help='Natural Earth feature resolution for --map '
+                             '(default: 50m)')
+    parser.add_argument('--sites', dest='sites',
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help='Mark the fixed observation sites (NANT, MVCO1, '
+                             'MVCO2, BLOC, RHOD, CACO) on the map '
+                             '(default: on; --map only)')
     parser.add_argument('--output', type=str, required=True,
                         help='Output GIF path')
 
     args = parser.parse_args()
+
+    if args.map and not _HAVE_CARTOPY:
+        raise SystemExit(
+            "The --map overlay requires cartopy, which is not importable. "
+            "Install it (e.g. `conda install -c conda-forge cartopy`) or rerun "
+            "with --no-map for the plain x/y-km plot.")
 
     # Register Py-ART reflectivity colormaps if available, then validate the
     # requested name and gracefully fall back to a matplotlib default.
@@ -361,4 +528,7 @@ if __name__ == '__main__':
         dpi=args.dpi,
         fps=args.fps,
         output=args.output,
+        use_map=args.map,
+        map_scale=args.map_scale,
+        show_sites=args.sites,
     )
