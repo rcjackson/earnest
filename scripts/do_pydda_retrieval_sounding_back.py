@@ -103,9 +103,9 @@ def make_grid(radar, origin_latitude, origin_longitude, origin_altitude,
         gatefilters=[gatefilter],
         grid_origin=(origin_latitude, origin_longitude),
         grid_origin_alt=origin_altitude,
-        roi_func='dist_beam',
+        roi_func='dist',
         min_radius=500.,
-        z_factor=0.01,
+        z_factor=0.02,
         xy_factor=0.008,
         weighting_function='Cressman')
     for field in ('velocity', 'corrected_velocity_unravel', 'corrected_velocity_region_based'):
@@ -115,7 +115,7 @@ def make_grid(radar, origin_latitude, origin_longitude, origin_altitude,
     return g
 
 
-def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_range, grid_spec):
+def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_range, grid_spec, tdwr=False):
     print(f"\n{'=' * 60}")
     print(f"Processing: {target_time.strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"{'=' * 60}")
@@ -123,8 +123,12 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
     # --- Radar files ---
     kbox_file = find_nearest_radar_file(args.kbox_dir, 'KBOX', target_time, args.radar_tolerance)
     kokx_file = find_nearest_radar_file(args.kokx_dir, 'KOKX', target_time, args.radar_tolerance)
+    if tdwr:
+        tbos_file = find_nearest_radar_file(args.tbos_dir, 'TBOS', target_time, args.radar_tolerance)
     print(f"KBOX: {kbox_file}")
     print(f"KOKX: {kokx_file}")
+    if tdwr:
+        print(f"TBOS: {tbos_file}")
 
     print("Loading and gridding KBOX")
     ds_kbos = pyart.io.read(kbox_file)
@@ -141,12 +145,20 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
     grid_kokx = make_grid(ds_kokx, origin_latitude, origin_longitude, origin_altitude,
                           grid_z_range, grid_y_range, grid_x_range, grid_spec)
 
+    if tdwr:
+        print("Loading and gridding KOKX")
+        ds_tbos = pyart.io.read(tbos_file)
+        grid_tbos = make_grid(ds_tbos, origin_latitude, origin_longitude, origin_altitude,
+                          grid_z_range, grid_y_range, grid_x_range, grid_spec)
+
     # --- Convert to pydda grids ---
     print("Initializing retrieval")
     grid_kbox = pydda.io.read_from_pyart_grid(grid_kbox)
     grid_kokx = pydda.io.read_from_pyart_grid(grid_kokx)
+    if tdwr:
+        grid_tbos = pydda.io.read_from_pyart_grid(grid_tbos)
 
-    # --- BCA observation weights ---
+    # --- BCA observation weights --- (Base on 2 nexrads, even if we have TDWR)
     bca0 = pydda.retrieval.get_bca(grid_kbox, grid_kokx)
     bca0 = np.tile(bca0, (grid_kbox.sizes["z"], 1, 1))
     bca = 30
@@ -157,15 +169,31 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
             np.isfinite(grid_kbox["corrected_velocity_unravel"].values).squeeze(),
             np.isfinite(grid_kokx["corrected_velocity_unravel"].values).squeeze()))
 
-    weights_kbox = np.isfinite(grid_kbox["corrected_velocity_unravel"].values).squeeze().astype(float)
-    weights_kokx = np.isfinite(grid_kokx["corrected_velocity_unravel"].values).squeeze().astype(float)
+    weights_kbox = np.isfinite(
+            grid_kbox["corrected_velocity_unravel"].values).squeeze().astype(float)
+    weights_kokx = np.isfinite(
+            grid_kokx["corrected_velocity_unravel"].values).squeeze().astype(float)
+    if tdwr:
+        weights_tbos = np.isfinite(
+            grid_tbos["corrected_velocity_unravel"].values).squeeze().astype(float)
+        weights_tbos += both_covered.astype(float)
+        weights_tbos = weights_tbos / weights_tbos.max()
+        weights_tbos[~np.isfinite(weights_tbos)] = 0
+
     weights_kbox += both_covered.astype(float)
     weights_kokx += both_covered.astype(float)
     weights_kbox = weights_kbox / weights_kbox.max()
     weights_kokx = weights_kokx / weights_kokx.max()
     weights_kbox[~np.isfinite(weights_kbox)] = 0
     weights_kokx[~np.isfinite(weights_kokx)] = 0
-
+    
+    
+    # No radar data from baseline
+    weights_kbox[bca0 > np.deg2rad(180 - bca)] = 0
+    weights_kokx[bca0 > np.deg2rad(180 - bca)] = 0
+    if tdwr:
+        weights_tbos[bca0 > np.deg2rad(180 - bca)] = 0
+    
     # Lower importance of winds in the purple haze ring (130–150 km)
     dist_kbox = np.sqrt(grid_kbox.point_x ** 2 + grid_kbox.point_y ** 2)
     phaze_kbox = np.logical_and(dist_kbox > args.phaze_min, dist_kbox < args.phaze_max)
@@ -209,19 +237,31 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
     H.download()
     
     grid_kbox = pydda.constraints.add_hrrr_constraint_to_grid(grid_kbox, H.grib)
-    grid_kbox["u"] = grid_kbox["U_hrrr"]
-    grid_kbox["v"] = grid_kbox["V_hrrr"]
-    grid_kbox["w"] = grid_kbox["W_hrrr"]
+    u_mean = grid_kbox["U_hrrr"].mean(dim=("y", "x"))   # -> (time, z)
+    v_mean = grid_kbox["V_hrrr"].mean(dim=("y", "x"))
+    w_mean = grid_kbox["W_hrrr"].mean(dim=("y", "x"))
 
-    bg_weights = 1 - weights_kbox
-    bg_weights[0, :, :] = 0
+    grid_kbox["u"] = u_mean.broadcast_like(grid_kbox["U_hrrr"]).copy()
+    grid_kbox["v"] = v_mean.broadcast_like(grid_kbox["V_hrrr"]).copy()
+    grid_kbox["w"] = w_mean.broadcast_like(grid_kbox["W_hrrr"]).copy()
+    bg_weights = np.where(
+            np.logical_or(weights_kbox > 0, weights_kokx > 0), 0, 1)
 
     print(f"Running retrieval: Co={args.Co} Cm={args.Cm} Cb={args.Cb} "
-          f"Cx={args.Cx} Cy={args.Cy} Cz={args.Cz} "
+     
+            f"Cx={args.Cx} Cy={args.Cy} Cz={args.Cz} "
           f"tol={args.tolerance} max_iter={args.max_iterations}")
 
     iterations = 0
-    grids = [grid_kbox, grid_kokx]
+    if not tdwr:
+        grids = [grid_kbox, grid_kokx]
+        weights = [weights_kbox, weights_kokx]
+    else:
+        grids = [grid_kbox, grid_kokx, grid_tbos]
+        weights = [weights_kbox, weights_kokx, weights_tbos]
+    time_str = grids[0]["time"].dt.strftime('%Y%m%d_%H%M%S').values[0]    
+    if os.path.exists(os.path.join(args.output_dir, f"grid_{time_str}_0.nc")):
+        return
     while iterations < args.max_iterations:
         grids, parameters = pydda.retrieval.get_dd_wind_field(
             grids,
@@ -230,19 +270,20 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
             u_back=u_wind, v_back=v_wind, z_back=z, frz=args.melting,
             model_fields=["hrrr"], 
             Cmod=args.Cb, tolerance=args.tolerance, max_iterations=args.filter_iterations,
-            Cx=args.Cx, Cy=args.Cy, Cz=args.Cz, low_pass_filter=False,
-            weights_obs=[weights_kbox, weights_kokx], weights_model=[bg_weights])
+            Cx=args.Cx, Cy=args.Cy, Cz=args.Cz, filter_type="leise",
+            weights_obs=weights, weights_bg=bg_weights)
         iterations += args.filter_iterations
-        if iterations < args.max_iterations:
-            grids[0]["u"][:] = gaussian_filter(grids[0]["u"].values, sigma=1.5)
-            grids[0]["v"][:] = gaussian_filter(grids[0]["v"].values, sigma=1.5)
-            grids[0]["w"][:] = gaussian_filter(grids[0]["w"].values, sigma=1.5)
+        grids, parameters = pydda.retrieval.get_dd_wind_field(
+            grids,
+            vel_name='corrected_velocity_unravel',
+            Co=args.Co, Cm=args.Cm, engine="jax", mask_outside_opt=False,
+            u_back=u_wind, v_back=v_wind, z_back=z, frz=args.melting,
+            model_fields=["hrrr"],
+            Cmod=args.Cb, tolerance=args.tolerance, 
+            max_iterations=(args.max_iterations-args.filter_iterations),
+            Cx=args.Cx, Cy=args.Cy, Cz=args.Cz, low_pass_filter=False,
+            weights_obs=weights, weights_bg=bg_weights)
 
-    grids[0]["u"][:] = gaussian_filter(grids[0]["u"].fillna(0).values, sigma=1.5)
-    grids[0]["v"][:] = gaussian_filter(grids[0]["v"].fillna(0).values, sigma=1.5)
-    grids[0]["w"][:] = gaussian_filter(grids[0]["w"].fillna(0).values, sigma=1.5)
-
-    time_str = grids[0]["time"].dt.strftime('%Y%m%d_%H%M%S').values[0]
     grids[0]["spd"] = np.sqrt(grids[0]["u"] ** 2 + grids[0]["v"] ** 2)
     grids[0]["spd"].attrs["long_name"] = "Wind speed"
     grids[0]["spd"].attrs["units"] = 'm s-1'
@@ -261,6 +302,7 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
     # --- Save grids ---
     for i, g in enumerate(grids):
         del g["time"].attrs["units"]
+        g.drop(["AZ", "EL", "clutter_filter_power_removed", "point_x", "point_y", "point_z", "point_longitude", "point_latitude"])
         g.attrs.update(retrieval_attrs)
         out_file = os.path.join(args.output_dir, f"grid_{time_str}_{i}.nc")
         g.to_netcdf(out_file)
@@ -368,6 +410,10 @@ if __name__ == "__main__":
                         help='Purple haze weight suppression factor (default: 2)')
     parser.add_argument('--melting', type=float, default=500.,
             help="Melting layer height")
+
+    # TDWR
+    parser.add_argument('--tdwr', action="store_true",
+            help="Set to enable TBOS in retrieval")
     # Output
     parser.add_argument('--output_dir', type=str, default=grid_out_path,
                         help=f'Output directory for retrieved grids (default: {grid_out_path})')
@@ -407,7 +453,8 @@ if __name__ == "__main__":
     for i, target_time in enumerate(time_steps):
         print(f"\n[{i + 1}/{len(time_steps)}]", end=" ")
         try:
-            process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_range, grid_spec)
+            process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_range, grid_spec,
+                    args.tdwr)
         except FileNotFoundError as e:
             print(f"SKIP — {e}")
             failed.append((target_time, str(e)))

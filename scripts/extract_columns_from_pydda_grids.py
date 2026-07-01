@@ -52,7 +52,7 @@ def main():
     args = parse_args()
     if not os.path.exists(args.out_data_dir):
         os.makedirs(args.out_data_dir)
-    grid_path = os.path.join(args.root_data_dir, f"grids_nearest_100iter_co1000_fxx{args.forecast_hour}")
+    grid_path = os.path.join(args.root_data_dir, f"grids_{args.experiment_name}")
     print(f"Grid path: {grid_path}")
     multidoppler_ds = xr.open_mfdataset(os.path.join(grid_path, f"*{args.date}*_0.nc"))
     columns = []
@@ -70,7 +70,7 @@ def main():
         columns.append(site_column)
     out_ds = xr.merge(columns, compat="override")
     out_ds.to_netcdf(os.path.join(args.out_data_dir, 
-        f"multidoppler_wind_columns_nearest_100iter_f{args.forecast_hour}_{args.date}.nc"))
+        f"multidoppler_wind_columns_{args.experiment_name}_{args.date}.nc"))
     multidoppler_ds.close()
     
     return
@@ -81,11 +81,10 @@ def parse_args():
       )
 
       argparser.add_argument(
-          "-f", "--forecast-hour",
-          type=int,
-          required=True,
-          help="Forecast hour (integer, e.g. 0, 6, 12, 24).",
-      )
+              "-e", "--experiment_name",
+              type=str,
+              required=True,
+              help="Experiment name")
       argparser.add_argument(
               "-d", "--date",
               type=str,
