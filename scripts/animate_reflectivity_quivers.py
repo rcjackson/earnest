@@ -179,12 +179,14 @@ def contour_field(name, data):
 
 
 def draw_contours(ax, xc, yc, data, contour_vars, contour_levels,
-                  transform=None):
+                  transform=None, valid_mask=None):
     """Overlay line contours of the requested wind components.
 
     ``xc``/``yc`` are the contour coordinate arrays (1-D x/y km, or 2-D lon/lat
-    when ``transform`` is a cartopy CRS). Returns a list of (label, Line2D-
-    proxy) legend handles for the components that were actually drawn.
+    when ``transform`` is a cartopy CRS). ``valid_mask`` is an optional boolean
+    array (True where valid); contours are restricted to those points so they
+    are only drawn over regions with valid reflectivity echoes. Returns a list
+    of (label, Line2D-proxy) legend handles for the components actually drawn.
     """
     from matplotlib.lines import Line2D
 
@@ -194,9 +196,14 @@ def draw_contours(ax, xc, yc, data, contour_vars, contour_levels,
         field = contour_field(name, data)
         if field is None or not np.any(np.isfinite(field)):
             continue
+        masked = np.ma.masked_invalid(field)
+        if valid_mask is not None:
+            masked = np.ma.masked_where(~valid_mask, masked)
+            if not np.any(~masked.mask):
+                continue
         style = CONTOUR_STYLE[name]
         cs = ax.contour(
-            xc, yc, np.ma.masked_invalid(field),
+            xc, yc, masked,
             levels=contour_levels, colors=style['colors'],
             linewidths=1.0, **extra)
         ax.clabel(cs, inline=True, fontsize=7, fmt='%.0f')
@@ -339,7 +346,8 @@ def draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,
     contour_x = X if use_map else data['x_km']
     contour_y = Y if use_map else data['y_km']
     handles = draw_contours(ax, contour_x, contour_y, data, contour_vars,
-                            contour_levels, transform=transform)
+                            contour_levels, transform=transform,
+                            valid_mask=valid)
     if handles:
         ax.legend(handles=handles, loc='upper right', fontsize=8,
                   framealpha=0.85)
