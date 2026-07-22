@@ -159,7 +159,7 @@ CONTOUR_STYLE = {
     'u': dict(colors='#1f77b4', label='u [m/s]'),
     'v': dict(colors='#d62728', label='v [m/s]'),
     'w': dict(colors='#000000', label='w [m/s]'),
-    'speed': dict(colors='#2ca02c', label='wind speed [m/s]'),
+    'speed': dict(colors='k', linewidth=2, label='wind speed [m/s]'),
 }
 
 
@@ -418,7 +418,7 @@ def build_animation(timestamps, files_a, files_b, level, refl_name, u_name,
             print(f"  [{frame + 1}/{len(timestamps)}] SKIP "
                   f"{os.path.basename(files_a[frame])}: {e}")
             return
-        title = (f'Combined reflectivity + retrieved winds — '
+        title = (f'$Z_e$ + winds — '
                  f'z={data["z_m"]:.0f} m — '
                  f'{ts:%Y-%m-%d %H:%M UTC}')
         draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap,

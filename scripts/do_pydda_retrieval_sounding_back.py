@@ -260,8 +260,8 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
         grids = [grid_kbox, grid_kokx, grid_tbos]
         weights = [weights_kbox, weights_kokx, weights_tbos]
     time_str = grids[0]["time"].dt.strftime('%Y%m%d_%H%M%S').values[0]    
-    if os.path.exists(os.path.join(args.output_dir, f"grid_{time_str}_0.nc")):
-        return
+    #if os.path.exists(os.path.join(args.output_dir, f"grid_{time_str}_0.nc")):
+    #    return
     while iterations < args.max_iterations:
         grids, parameters = pydda.retrieval.get_dd_wind_field(
             grids,
@@ -275,7 +275,7 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
         iterations += args.filter_iterations
         grids, parameters = pydda.retrieval.get_dd_wind_field(
             grids,
-            vel_name='corrected_velocity_unravel',
+            vel_name='corrected_velocity_region_based',
             Co=args.Co, Cm=args.Cm, engine="jax", mask_outside_opt=False,
             u_back=u_wind, v_back=v_wind, z_back=z, frz=args.melting,
             model_fields=["hrrr"],
