@@ -30,9 +30,12 @@ Example
 import argparse
 import glob
 import os
+import re
 
 import numpy as np
 import xarray as xr
+
+GRID_INDEX_RE = re.compile(r'^(.*)_(\d+)\.nc$')
 
 KEEP_VARS = ('reflectivity', 'u', 'v', 'w', 'spd', 'dir')
 
@@ -90,6 +93,24 @@ def postprocess_grid(ds, sigma=1.5):
     return ds.drop_vars(drop_vars)
 
 
+def merge_max_reflectivity(processed_grids):
+    """Merge post-processed grids that share one wind field but have their
+    own ``reflectivity`` (e.g. the ``_0``/``_1`` per-radar grids written by
+    ``do_pydda_retrieval_sounding_back.py``).
+
+    ``u``/``v``/``w``/``spd``/``dir`` are taken from the first grid (they are
+    the same retrieved wind field broadcast to every grid); ``reflectivity``
+    is the elementwise maximum across all of them, ignoring NaNs.
+    """
+    merged = processed_grids[0].copy()
+    attrs = processed_grids[0]['reflectivity'].attrs
+    refl_stack = xr.concat([g['reflectivity'] for g in processed_grids],
+                           dim='_grid')
+    merged['reflectivity'] = refl_stack.max(dim='_grid', skipna=True)
+    merged['reflectivity'].attrs = attrs
+    return merged
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Post-process PyDDA retrieval grids: Gaussian-smooth '
@@ -113,16 +134,44 @@ if __name__ == '__main__':
     if not files:
         raise SystemExit(f"No files matching {args.pattern} in {args.grid_dir}")
 
+    # Group files sharing a common base name (e.g. grid_20240213_065753_0.nc
+    # and grid_20240213_065753_1.nc share the base grid_20240213_065753) so
+    # that _0/_1 pairs can be merged into a single max-reflectivity grid.
+    groups = {}
+    order = []
     for f in files:
-        out_path = (os.path.join(args.output_dir, os.path.basename(f))
-                   if args.output_dir else f)
-        with xr.open_dataset(f) as ds:
-            processed = postprocess_grid(ds, sigma=args.sigma)
-            processed.load()
-        if out_path == f:
-            tmp_path = out_path + '.tmp'
-            processed.to_netcdf(tmp_path)
-            os.replace(tmp_path, out_path)
-        else:
-            processed.to_netcdf(out_path)
-        print(f"Post-processed: {out_path}")
+        base = os.path.basename(f)
+        match = GRID_INDEX_RE.match(base)
+        key, idx = (match.group(1), int(match.group(2))) if match else (base, None)
+        if key not in groups:
+            groups[key] = {}
+            order.append(key)
+        groups[key][idx] = f
+
+    for key in order:
+        idx_map = groups[key]
+        if set(idx_map) == {0, 1}:
+            processed_grids = []
+            for idx in (0, 1):
+                with xr.open_dataset(idx_map[idx]) as ds:
+                    processed_grids.append(postprocess_grid(ds, sigma=args.sigma).load())
+            merged = merge_max_reflectivity(processed_grids)
+            out_dir = args.output_dir or args.grid_dir
+            out_path = os.path.join(out_dir, f"{key}.nc")
+            merged.to_netcdf(out_path)
+            print(f"Post-processed (merged max reflectivity): {out_path}")
+            continue
+
+        for f in idx_map.values():
+            out_path = (os.path.join(args.output_dir, os.path.basename(f))
+                       if args.output_dir else f)
+            with xr.open_dataset(f) as ds:
+                processed = postprocess_grid(ds, sigma=args.sigma)
+                processed.load()
+            if out_path == f:
+                tmp_path = out_path + '.tmp'
+                processed.to_netcdf(tmp_path)
+                os.replace(tmp_path, out_path)
+            else:
+                processed.to_netcdf(out_path)
+            print(f"Post-processed: {out_path}")
