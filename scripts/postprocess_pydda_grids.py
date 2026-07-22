@@ -20,7 +20,9 @@ For each grid:
   dropped.
 * If ``--quicklook_dir`` is given, a standalone reflectivity + wind-quiver
   PNG (the same rendering as ``animate_reflectivity_quivers.py``) is saved
-  for each output grid, named ``quicklook_YYYYMMDD_HHMMSS.png``.
+  for each output grid, named ``quicklook_YYYYMMDD_HHMMSS.png``. Pass
+  ``--speed_contours`` to also overlay labeled horizontal wind speed
+  contours on it.
 * Unless ``--no-xsec`` is passed, a second quicklook is also saved to
   ``--quicklook_dir``: a two-panel vertical cross section of reflectivity +
   in-plane wind (E-W using u/w, N-S using v/w) through ``--xsec_site``
@@ -127,10 +129,16 @@ def merge_max_reflectivity(processed_grids):
 
 
 def save_quicklook(ds, out_path, level, vmin, vmax, cmap, quiver_spacing_km,
-                   quiver_scale, dpi, figsize, use_map, map_scale, show_sites):
+                   quiver_scale, dpi, figsize, use_map, map_scale, show_sites,
+                   speed_contour_levels=None):
     """Render one post-processed grid's reflectivity + wind quivers to a
     standalone PNG, reusing ``draw_frame`` from
     ``animate_reflectivity_quivers.py`` so quicklooks match the animation.
+
+    If ``speed_contour_levels`` is given, labeled contours of the horizontal
+    wind speed sqrt(u**2 + v**2) are overlaid (restricted to points with a
+    valid reflectivity value), via ``draw_frame``'s built-in 'speed' contour
+    support.
     """
     data = dict(
         x_km=ds['x'].values * 1e-3,
@@ -151,9 +159,11 @@ def save_quicklook(ds, out_path, level, vmin, vmax, cmap, quiver_spacing_km,
     fig, ax = plt.subplots(figsize=figsize, subplot_kw=subplot_kw)
     fig.subplots_adjust(right=0.86)
     cbar_ax = fig.add_axes([0.88, 0.15, 0.02, 0.7])
+    contour_vars = ('speed',) if speed_contour_levels else ()
     draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap, quiver_spacing_km,
-              quiver_scale, title, use_map=use_map, map_scale=map_scale,
-              show_sites=show_sites)
+              quiver_scale, title, contour_vars=contour_vars,
+              contour_levels=speed_contour_levels, use_map=use_map,
+              map_scale=map_scale, show_sites=show_sites)
     fig.savefig(out_path, dpi=dpi)
     plt.close(fig)
 
@@ -344,6 +354,11 @@ if __name__ == '__main__':
                         action=argparse.BooleanOptionalAction, default=True,
                         help='Mark the fixed observation sites on quicklook '
                              'maps (default: on; --map only)')
+    parser.add_argument('--speed_contours', nargs='*', type=float, default=None,
+                        help='Labeled contour levels (m/s) of the horizontal '
+                             'wind speed sqrt(u^2+v^2) to overlay on the '
+                             'plan-view quicklook; omit to disable (default: '
+                             'off)')
     parser.add_argument('--xsec', dest='xsec',
                         action=argparse.BooleanOptionalAction, default=True,
                         help='Also save a vertical cross-section quicklook '
@@ -443,7 +458,8 @@ if __name__ == '__main__':
                 save_quicklook(merged, png_path, args.level, args.vmin,
                                args.vmax, args.cmap, args.quiver_spacing_km,
                                args.quiver_scale, args.dpi, tuple(args.figsize),
-                               args.map, args.map_scale, args.sites)
+                               args.map, args.map_scale, args.sites,
+                               speed_contour_levels=args.speed_contours)
                 print(f"  Saved quicklook: {png_path}")
                 if args.xsec:
                     xsec_path = os.path.join(
@@ -478,7 +494,8 @@ if __name__ == '__main__':
                 save_quicklook(processed, png_path, args.level, args.vmin,
                                args.vmax, args.cmap, args.quiver_spacing_km,
                                args.quiver_scale, args.dpi, tuple(args.figsize),
-                               args.map, args.map_scale, args.sites)
+                               args.map, args.map_scale, args.sites,
+                               speed_contour_levels=args.speed_contours)
                 print(f"  Saved quicklook: {png_path}")
                 if args.xsec:
                     xsec_path = os.path.join(
