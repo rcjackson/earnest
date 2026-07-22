@@ -18,13 +18,17 @@ For each grid:
 * Only ``reflectivity``, ``u``, ``v``, ``w``, ``spd``, and ``dir`` are kept;
   every other variable (HRRR fields, radar moments, point geometry, etc.) is
   dropped.
+* If ``--quicklook_dir`` is given, a standalone reflectivity + wind-quiver
+  PNG (the same rendering as ``animate_reflectivity_quivers.py``) is saved
+  for each output grid, named ``quicklook_YYYYMMDD_HHMMSS.png``.
 
 Example
 -------
     python postprocess_pydda_grids.py \
         --grid_dir /projects/storm/rjackson/wfip3/multidoppler_grids/grids \
         --output_dir /projects/storm/rjackson/wfip3/multidoppler_grids/grids_post \
-        --sigma 1.5
+        --sigma 1.5 \
+        --quicklook_dir /projects/storm/rjackson/wfip3/multidoppler_grids/quicklooks
 """
 
 import argparse
@@ -33,7 +37,14 @@ import os
 import re
 
 import numpy as np
+import pandas as pd
 import xarray as xr
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+from animate_reflectivity_quivers import draw_frame, _HAVE_CARTOPY, ccrs
 
 GRID_INDEX_RE = re.compile(r'^(.*)_(\d+)\.nc$')
 
@@ -111,6 +122,38 @@ def merge_max_reflectivity(processed_grids):
     return merged
 
 
+def save_quicklook(ds, out_path, level, vmin, vmax, cmap, quiver_spacing_km,
+                   quiver_scale, dpi, figsize, use_map, map_scale, show_sites):
+    """Render one post-processed grid's reflectivity + wind quivers to a
+    standalone PNG, reusing ``draw_frame`` from
+    ``animate_reflectivity_quivers.py`` so quicklooks match the animation.
+    """
+    data = dict(
+        x_km=ds['x'].values * 1e-3,
+        y_km=ds['y'].values * 1e-3,
+        lon2d=np.asarray(ds['lon'].values, dtype=float),
+        lat2d=np.asarray(ds['lat'].values, dtype=float),
+        z_m=float(ds['z'].values[level]),
+        refl=np.asarray(ds['reflectivity'].isel(time=0, z=level).values, dtype=float),
+        u=np.asarray(ds['u'].isel(time=0, z=level).values, dtype=float),
+        v=np.asarray(ds['v'].isel(time=0, z=level).values, dtype=float),
+        w=(np.asarray(ds['w'].isel(time=0, z=level).values, dtype=float)
+           if 'w' in ds else None),
+    )
+    ts = pd.Timestamp(ds['time'].values[0]).to_pydatetime()
+    title = f'$Z_e$ + winds — z={data["z_m"]:.0f} m — {ts:%Y-%m-%d %H:%M UTC}'
+
+    subplot_kw = {'projection': ccrs.PlateCarree()} if use_map else None
+    fig, ax = plt.subplots(figsize=figsize, subplot_kw=subplot_kw)
+    fig.subplots_adjust(right=0.86)
+    cbar_ax = fig.add_axes([0.88, 0.15, 0.02, 0.7])
+    draw_frame(fig, ax, cbar_ax, data, vmin, vmax, cmap, quiver_spacing_km,
+              quiver_scale, title, use_map=use_map, map_scale=map_scale,
+              show_sites=show_sites)
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Post-process PyDDA retrieval grids: Gaussian-smooth '
@@ -125,10 +168,65 @@ if __name__ == '__main__':
                              'cells (default: 1.5)')
     parser.add_argument('--pattern', type=str, default='grid_*.nc',
                         help='Glob pattern for grid files (default: grid_*.nc)')
+    parser.add_argument('--quicklook_dir', type=str, default=None,
+                        help='If set, also save a reflectivity + wind-quiver '
+                             'quicklook_YYYYMMDD_HHMMSS.png for each output '
+                             'grid in this directory')
+    parser.add_argument('--level', type=int, default=1,
+                        help='Z-index to plot in quicklooks (default: 1)')
+    parser.add_argument('--vmin', type=float, default=-10.0,
+                        help='Quicklook reflectivity colormap minimum dBZ '
+                             '(default: -10)')
+    parser.add_argument('--vmax', type=float, default=40.0,
+                        help='Quicklook reflectivity colormap maximum dBZ '
+                             '(default: 40)')
+    parser.add_argument('--cmap', type=str, default='HomeyerRainbow',
+                        help='Quicklook background colormap. Py-ART '
+                             'reflectivity maps (e.g. HomeyerRainbow, NWSRef) '
+                             'are registered when Py-ART is installed; falls '
+                             'back to "Spectral_r" if unavailable.')
+    parser.add_argument('--quiver_spacing_km', type=float, default=20.0,
+                        help='Approximate quicklook quiver spacing in km '
+                             '(default: 20)')
+    parser.add_argument('--quiver_scale', type=float, default=400.0,
+                        help='matplotlib quiver "scale" for quicklooks — '
+                             'larger = shorter arrows (default: 400)')
+    parser.add_argument('--dpi', type=int, default=120,
+                        help='Quicklook output DPI (default: 120)')
+    parser.add_argument('--figsize', type=float, nargs=2, default=[8.0, 7.0],
+                        help='Quicklook figure size W H in inches '
+                             '(default: 8 7)')
+    parser.add_argument('--map', dest='map', action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help='Draw quicklooks on a geographic map (default: '
+                             'on; use --no-map for the plain x/y-km plot)')
+    parser.add_argument('--map_scale', type=str, default='50m',
+                        choices=['10m', '50m', '110m'],
+                        help='Natural Earth feature resolution for --map '
+                             '(default: 50m)')
+    parser.add_argument('--sites', dest='sites',
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help='Mark the fixed observation sites on quicklook '
+                             'maps (default: on; --map only)')
     args = parser.parse_args()
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.quicklook_dir:
+        os.makedirs(args.quicklook_dir, exist_ok=True)
+        if args.map and not _HAVE_CARTOPY:
+            raise SystemExit(
+                "--quicklook_dir with --map requires cartopy, which is not "
+                "importable. Install it (e.g. `conda install -c conda-forge "
+                "cartopy`) or rerun with --no-map.")
+        try:
+            import pyart  # noqa: F401  (registers its colormaps on import)
+        except Exception:
+            pass
+        if args.cmap not in plt.colormaps():
+            print(f"Colormap '{args.cmap}' unavailable; using 'Spectral_r' instead.")
+            args.cmap = 'Spectral_r'
 
     files = sorted(glob.glob(os.path.join(args.grid_dir, args.pattern)))
     if not files:
@@ -160,6 +258,15 @@ if __name__ == '__main__':
             out_path = os.path.join(out_dir, f"{key}.nc")
             merged.to_netcdf(out_path)
             print(f"Post-processed (merged max reflectivity): {out_path}")
+            if args.quicklook_dir:
+                ts = pd.Timestamp(merged['time'].values[0]).to_pydatetime()
+                png_path = os.path.join(
+                    args.quicklook_dir, f"quicklook_{ts:%Y%m%d_%H%M%S}.png")
+                save_quicklook(merged, png_path, args.level, args.vmin,
+                               args.vmax, args.cmap, args.quiver_spacing_km,
+                               args.quiver_scale, args.dpi, tuple(args.figsize),
+                               args.map, args.map_scale, args.sites)
+                print(f"  Saved quicklook: {png_path}")
             continue
 
         for f in idx_map.values():
@@ -175,3 +282,12 @@ if __name__ == '__main__':
             else:
                 processed.to_netcdf(out_path)
             print(f"Post-processed: {out_path}")
+            if args.quicklook_dir:
+                ts = pd.Timestamp(processed['time'].values[0]).to_pydatetime()
+                png_path = os.path.join(
+                    args.quicklook_dir, f"quicklook_{ts:%Y%m%d_%H%M%S}.png")
+                save_quicklook(processed, png_path, args.level, args.vmin,
+                               args.vmax, args.cmap, args.quiver_spacing_km,
+                               args.quiver_scale, args.dpi, tuple(args.figsize),
+                               args.map, args.map_scale, args.sites)
+                print(f"  Saved quicklook: {png_path}")

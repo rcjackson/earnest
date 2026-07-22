@@ -22,6 +22,14 @@ Example
         --level 1 \
         --output reflectivity_quivers.gif
 
+Pass ``--quicklook_dir`` to also save each frame as a standalone PNG (in
+addition to the GIF), named ``quicklook_YYYYMMDD_HHMMSS.png``::
+
+    python animate_reflectivity_quivers.py \
+        --grid_dir /path/to/grids \
+        --output reflectivity_quivers.gif \
+        --quicklook_dir /path/to/quicklooks
+
 Optionally overlay line contours of any of the u/v/w wind components — or of
 the horizontal wind speed sqrt(u**2 + v**2) via ``speed`` — on top of the
 reflectivity shading and quivers::
@@ -403,11 +411,15 @@ def build_animation(timestamps, files_a, files_b, level, refl_name, u_name,
                     v_name, w_name, vmin, vmax, cmap, quiver_spacing_km,
                     quiver_scale, contour_vars, contour_levels,
                     figsize, dpi, fps, output, contour_smooth=0,
-                    use_map=False, map_scale='50m', show_sites=True):
+                    use_map=False, map_scale='50m', show_sites=True,
+                    quicklook_dir=None):
     subplot_kw = ({'projection': ccrs.PlateCarree()} if use_map else None)
     fig, ax = plt.subplots(figsize=figsize, subplot_kw=subplot_kw)
     fig.subplots_adjust(right=0.86)
     cbar_ax = fig.add_axes([0.88, 0.15, 0.02, 0.7])
+
+    if quicklook_dir:
+        os.makedirs(quicklook_dir, exist_ok=True)
 
     def update(frame):
         ts = timestamps[frame]
@@ -426,6 +438,10 @@ def build_animation(timestamps, files_a, files_b, level, refl_name, u_name,
                    contour_vars=contour_vars, contour_levels=contour_levels,
                    contour_smooth=contour_smooth,
                    use_map=use_map, map_scale=map_scale, show_sites=show_sites)
+        if quicklook_dir:
+            png_path = os.path.join(
+                quicklook_dir, f'quicklook_{ts:%Y%m%d_%H%M%S}.png')
+            fig.savefig(png_path, dpi=dpi)
         print(f"  [{frame + 1}/{len(timestamps)}] {ts:%Y-%m-%d %H:%M}")
 
     anim = animation.FuncAnimation(
@@ -434,6 +450,8 @@ def build_animation(timestamps, files_a, files_b, level, refl_name, u_name,
     anim.save(output, writer=writer, dpi=dpi)
     plt.close(fig)
     print(f"Saved animation: {output}")
+    if quicklook_dir:
+        print(f"Saved {len(timestamps)} quicklook PNG(s) to: {quicklook_dir}")
 
 
 def parse_optional_time(s):
@@ -518,6 +536,9 @@ if __name__ == '__main__':
                              '(default: on; --map only)')
     parser.add_argument('--output', type=str, required=True,
                         help='Output GIF path')
+    parser.add_argument('--quicklook_dir', type=str, default=None,
+                        help='If set, also save each frame as a standalone '
+                             'quicklook_YYYYMMDD_HHMMSS.png in this directory')
 
     args = parser.parse_args()
 
@@ -574,4 +595,5 @@ if __name__ == '__main__':
         use_map=args.map,
         map_scale=args.map_scale,
         show_sites=args.sites,
+        quicklook_dir=args.quicklook_dir,
     )
