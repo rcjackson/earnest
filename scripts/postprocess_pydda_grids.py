@@ -21,6 +21,10 @@ For each grid:
 * If ``--quicklook_dir`` is given, a standalone reflectivity + wind-quiver
   PNG (the same rendering as ``animate_reflectivity_quivers.py``) is saved
   for each output grid, named ``quicklook_YYYYMMDD_HHMMSS.png``.
+* Unless ``--no-xsec`` is passed, a second quicklook is also saved to
+  ``--quicklook_dir``: a two-panel vertical cross section of reflectivity +
+  in-plane wind (E-W using u/w, N-S using v/w) through ``--xsec_site``
+  (default ``BLOC``), named ``xsec_<SITE>_YYYYMMDD_HHMMSS.png``.
 
 Example
 -------
@@ -44,7 +48,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from animate_reflectivity_quivers import draw_frame, _HAVE_CARTOPY, ccrs
+from animate_reflectivity_quivers import draw_frame, _HAVE_CARTOPY, ccrs, SITES
 
 GRID_INDEX_RE = re.compile(r'^(.*)_(\d+)\.nc$')
 
@@ -154,6 +158,138 @@ def save_quicklook(ds, out_path, level, vmin, vmax, cmap, quiver_spacing_km,
     plt.close(fig)
 
 
+def find_site(site_code):
+    """Look up (lat, lon) for a station code in ``SITES``."""
+    for code, _name, lat, lon in SITES:
+        if code == site_code.upper():
+            return lat, lon
+    known = ', '.join(code for code, *_ in SITES)
+    raise SystemExit(f"Unknown --xsec_site '{site_code}'; known sites: {known}")
+
+
+def nearest_xy_index(ds, target_lat, target_lon):
+    """Return the (iy, ix) grid index nearest to (target_lat, target_lon).
+
+    Equirectangular approximation (longitude scaled by cos(lat)) is plenty
+    for picking a single column, matching ``extract_columns_from_pydda_grids.py``.
+    """
+    lat2d = np.asarray(ds['lat'].values, dtype=float)
+    lon2d = np.asarray(ds['lon'].values, dtype=float)
+    coslat = np.cos(np.deg2rad(target_lat))
+    dlat = lat2d - target_lat
+    dlon = (lon2d - target_lon) * coslat
+    dist2 = dlat**2 + dlon**2
+    iy, ix = np.unravel_index(np.argmin(dist2), dist2.shape)
+    return int(iy), int(ix)
+
+
+def draw_cross_section(ax, x_km, z_km, refl, comp, w, vmin, vmax, cmap,
+                       quiver_spacing_km, quiver_spacing_z_km, quiver_scale,
+                       w_exaggeration, w_contour_levels, site_x_km,
+                       site_label, xlabel, title, zmax_km=None):
+    """Draw one z/x (or z/y) reflectivity + wind quiver cross section on ``ax``.
+
+    ``comp`` is the in-plane horizontal wind component (u for an E-W section,
+    v for a N-S section); ``w`` is the vertical velocity, plotted against the
+    same horizontal axis as ``comp``. ``w`` is multiplied by
+    ``w_exaggeration`` before drawing quivers (display only) since it is
+    typically an order of magnitude weaker than the horizontal wind and would
+    otherwise be invisible at a ``quiver_scale`` tuned for ``comp``; the true
+    (unexaggerated) ``w`` is contoured with labeled black lines (solid for
+    updrafts, dashed for downdrafts) when ``w_contour_levels`` is non-empty.
+    """
+    ax.clear()
+    refl_masked = np.ma.masked_invalid(refl)
+    mesh = ax.pcolormesh(x_km, z_km, refl_masked, cmap=cmap, vmin=vmin,
+                         vmax=vmax, shading='auto')
+
+    dx_km = x_km[1] - x_km[0]
+    dz_km = z_km[1] - z_km[0]
+    sx = max(1, int(round(quiver_spacing_km / max(abs(dx_km), 1e-6))))
+    sz = max(1, int(round(quiver_spacing_z_km / max(abs(dz_km), 1e-6))))
+    Xg, Zg = np.meshgrid(x_km, z_km)
+    sub = (slice(None, None, sz), slice(None, None, sx))
+    qmask = np.isfinite(refl)[sub]
+    ax.quiver(Xg[sub][qmask], Zg[sub][qmask], comp[sub][qmask],
+              w[sub][qmask] * w_exaggeration, scale=quiver_scale,
+              color='black', width=0.0022, pivot='middle')
+
+    if w_contour_levels:
+        w_masked = np.ma.masked_where(~np.isfinite(refl), np.ma.masked_invalid(w))
+        if np.any(~w_masked.mask):
+            cs = ax.contour(Xg, Zg, w_masked, levels=w_contour_levels,
+                            colors='k', linewidths=0.8)
+            ax.clabel(cs, inline=True, fontsize=6, fmt='%.0f')
+
+    top_km = zmax_km if zmax_km is not None else z_km[-1]
+    ax.axvline(site_x_km, color='magenta', linestyle='--', linewidth=1.2)
+    ax.text(site_x_km, top_km, f' {site_label}', color='magenta', fontsize=8,
+           fontweight='bold', ha='left', va='top')
+
+    ax.set_xlim(x_km[0], x_km[-1])
+    ax.set_ylim(z_km[0], top_km)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('Height [km]')
+    ax.set_title(title, fontsize=10)
+    return mesh
+
+
+def save_cross_section_quicklook(ds, out_path, site_code, vmin, vmax, cmap,
+                                 quiver_spacing_km, quiver_spacing_z_km,
+                                 quiver_scale, w_exaggeration, w_contour_levels,
+                                 dpi, figsize, zmax_km=None):
+    """Render E-W (longitudinal) and N-S (latitudinal) vertical cross
+    sections of reflectivity + in-plane wind through ``site_code`` to a
+    standalone two-panel PNG.
+    """
+    site_lat, site_lon = find_site(site_code)
+    iy, ix = nearest_xy_index(ds, site_lat, site_lon)
+    actual_lat = float(ds['lat'].values[iy, ix])
+    actual_lon = float(ds['lon'].values[iy, ix])
+
+    x_km = ds['x'].values * 1e-3
+    y_km = ds['y'].values * 1e-3
+    z_km = ds['z'].values * 1e-3
+
+    refl = ds['reflectivity'].isel(time=0)
+    u = np.asarray(ds['u'].isel(time=0).values, dtype=float)
+    v = np.asarray(ds['v'].isel(time=0).values, dtype=float)
+    w = (np.asarray(ds['w'].isel(time=0).values, dtype=float) if 'w' in ds
+        else np.zeros_like(u))
+
+    refl_ew = np.asarray(refl.isel(y=iy).values, dtype=float)
+    refl_ns = np.asarray(refl.isel(x=ix).values, dtype=float)
+
+    ts = pd.Timestamp(ds['time'].values[0]).to_pydatetime()
+
+    fig, (ax_ew, ax_ns) = plt.subplots(2, 1, figsize=figsize)
+    fig.subplots_adjust(right=0.86, top=0.88, hspace=0.4)
+    cbar_ax = fig.add_axes([0.88, 0.15, 0.02, 0.7])
+
+    draw_cross_section(
+        ax_ew, x_km, z_km, refl_ew, u[:, iy, :], w[:, iy, :], vmin, vmax, cmap,
+        quiver_spacing_km, quiver_spacing_z_km, quiver_scale, w_exaggeration,
+        w_contour_levels, x_km[ix], site_code, 'X [km]',
+        f'Longitudinal (E-W) cross section thru {site_code} — lat≈{actual_lat:.3f}°N',
+        zmax_km=zmax_km)
+    mesh = draw_cross_section(
+        ax_ns, y_km, z_km, refl_ns, v[:, :, ix], w[:, :, ix], vmin, vmax, cmap,
+        quiver_spacing_km, quiver_spacing_z_km, quiver_scale, w_exaggeration,
+        w_contour_levels, y_km[iy], site_code, 'Y [km]',
+        f'Latitudinal (N-S) cross section thru {site_code} — lon≈{actual_lon:.3f}°E',
+        zmax_km=zmax_km)
+
+    fig.colorbar(mesh, cax=cbar_ax, label='Reflectivity [dBZ]')
+    fig.suptitle(f'{site_code} vertical cross sections — {ts:%Y-%m-%d %H:%M UTC}',
+                fontsize=13, y=0.98)
+    note = f'quivers: w exaggerated {w_exaggeration:g}x'
+    if w_contour_levels:
+        note += '  —  contours: true w [m/s]'
+    fig.text(0.5, 0.925, note, ha='center', fontsize=8.5, color='dimgray')
+    fig.savefig(out_path, dpi=dpi)
+    plt.close(fig)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Post-process PyDDA retrieval grids: Gaussian-smooth '
@@ -208,6 +344,46 @@ if __name__ == '__main__':
                         action=argparse.BooleanOptionalAction, default=True,
                         help='Mark the fixed observation sites on quicklook '
                              'maps (default: on; --map only)')
+    parser.add_argument('--xsec', dest='xsec',
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help='Also save a vertical cross-section quicklook '
+                             '(E-W and N-S through --xsec_site) for each '
+                             'output grid in --quicklook_dir (default: on; '
+                             'use --no-xsec to disable)')
+    parser.add_argument('--xsec_site', type=str, default='BLOC',
+                        help='Station code (from animate_reflectivity_quivers'
+                             '.SITES, e.g. BLOC, NANT, MVCO, RHOD, CACO) to '
+                             'center the vertical cross sections on '
+                             '(default: BLOC)')
+    parser.add_argument('--xsec_quiver_spacing_km', type=float, default=20.0,
+                        help='Approximate cross-section quiver spacing along '
+                             'the horizontal axis in km (default: 20)')
+    parser.add_argument('--xsec_quiver_spacing_z_km', type=float, default=1.0,
+                        help='Approximate cross-section quiver spacing along '
+                             'the vertical axis in km (default: 1)')
+    parser.add_argument('--xsec_quiver_scale', type=float, default=400.0,
+                        help='matplotlib quiver "scale" for cross sections — '
+                             'larger = shorter arrows (default: 400, same as '
+                             '--quiver_scale since it applies to the '
+                             'horizontal wind component; see '
+                             '--xsec_w_exaggeration for the vertical one)')
+    parser.add_argument('--xsec_w_exaggeration', type=float, default=5.0,
+                        help='Factor to multiply w by (display only) before '
+                             'drawing cross-section quivers, since w is '
+                             'typically much weaker than the horizontal wind '
+                             'and would otherwise be invisible (default: 5)')
+    parser.add_argument('--xsec_w_contours', nargs='*', type=float,
+                        default=[-4.0, -2.0, 2.0, 4.0],
+                        help='Labeled black contour levels (m/s) of the true '
+                             '(unexaggerated) w to overlay on the cross '
+                             'sections; pass with no values to disable '
+                             '(default: -4 -2 2 4)')
+    parser.add_argument('--xsec_figsize', type=float, nargs=2, default=[8.0, 9.0],
+                        help='Cross-section figure size W H in inches '
+                             '(default: 8 9)')
+    parser.add_argument('--xsec_zmax_km', type=float, default=None,
+                        help='If set, cap the cross-section height axis at '
+                             'this many km (default: full grid depth)')
     args = parser.parse_args()
 
     if args.output_dir:
@@ -227,6 +403,8 @@ if __name__ == '__main__':
         if args.cmap not in plt.colormaps():
             print(f"Colormap '{args.cmap}' unavailable; using 'Spectral_r' instead.")
             args.cmap = 'Spectral_r'
+        if args.xsec:
+            find_site(args.xsec_site)  # fail fast on an unknown --xsec_site
 
     files = sorted(glob.glob(os.path.join(args.grid_dir, args.pattern)))
     if not files:
@@ -267,6 +445,17 @@ if __name__ == '__main__':
                                args.quiver_scale, args.dpi, tuple(args.figsize),
                                args.map, args.map_scale, args.sites)
                 print(f"  Saved quicklook: {png_path}")
+                if args.xsec:
+                    xsec_path = os.path.join(
+                        args.quicklook_dir,
+                        f"xsec_{args.xsec_site}_{ts:%Y%m%d_%H%M%S}.png")
+                    save_cross_section_quicklook(
+                        merged, xsec_path, args.xsec_site, args.vmin, args.vmax,
+                        args.cmap, args.xsec_quiver_spacing_km,
+                        args.xsec_quiver_spacing_z_km, args.xsec_quiver_scale,
+                        args.xsec_w_exaggeration, args.xsec_w_contours,
+                        args.dpi, tuple(args.xsec_figsize), args.xsec_zmax_km)
+                    print(f"  Saved cross-section quicklook: {xsec_path}")
             continue
 
         for f in idx_map.values():
@@ -291,3 +480,14 @@ if __name__ == '__main__':
                                args.quiver_scale, args.dpi, tuple(args.figsize),
                                args.map, args.map_scale, args.sites)
                 print(f"  Saved quicklook: {png_path}")
+                if args.xsec:
+                    xsec_path = os.path.join(
+                        args.quicklook_dir,
+                        f"xsec_{args.xsec_site}_{ts:%Y%m%d_%H%M%S}.png")
+                    save_cross_section_quicklook(
+                        processed, xsec_path, args.xsec_site, args.vmin,
+                        args.vmax, args.cmap, args.xsec_quiver_spacing_km,
+                        args.xsec_quiver_spacing_z_km, args.xsec_quiver_scale,
+                        args.xsec_w_exaggeration, args.xsec_w_contours,
+                        args.dpi, tuple(args.xsec_figsize), args.xsec_zmax_km)
+                    print(f"  Saved cross-section quicklook: {xsec_path}")
