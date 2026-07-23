@@ -239,11 +239,10 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
     grid_kbox = pydda.constraints.add_hrrr_constraint_to_grid(grid_kbox, H.grib)
     u_mean = grid_kbox["U_hrrr"].mean(dim=("y", "x"))   # -> (time, z)
     v_mean = grid_kbox["V_hrrr"].mean(dim=("y", "x"))
-    w_mean = grid_kbox["W_hrrr"].mean(dim=("y", "x"))
 
     grid_kbox["u"] = u_mean.broadcast_like(grid_kbox["U_hrrr"]).copy()
     grid_kbox["v"] = v_mean.broadcast_like(grid_kbox["V_hrrr"]).copy()
-    grid_kbox["w"] = w_mean.broadcast_like(grid_kbox["W_hrrr"]).copy()
+    grid_kbox["w"] = 0 * v_mean.broadcast_like(grid_kbox["V_hrrr"]).copy()
     bg_weights = np.where(
             np.logical_or(weights_kbox > 0, weights_kokx > 0), 0, 1)
 
@@ -260,12 +259,12 @@ def process_time_step(target_time, args, grid_z_range, grid_y_range, grid_x_rang
         grids = [grid_kbox, grid_kokx, grid_tbos]
         weights = [weights_kbox, weights_kokx, weights_tbos]
     time_str = grids[0]["time"].dt.strftime('%Y%m%d_%H%M%S').values[0]    
-    #if os.path.exists(os.path.join(args.output_dir, f"grid_{time_str}_0.nc")):
-    #    return
+    if os.path.exists(os.path.join(args.output_dir, f"grid_{time_str}_0.nc")):
+        return
     while iterations < args.max_iterations:
         grids, parameters = pydda.retrieval.get_dd_wind_field(
             grids,
-            vel_name='corrected_velocity_unravel',
+            vel_name='corrected_velocity_region_based',
             Co=args.Co, Cm=args.Cm, engine="jax", mask_outside_opt=False,
             u_back=u_wind, v_back=v_wind, z_back=z, frz=args.melting,
             model_fields=["hrrr"], 
