@@ -15,6 +15,10 @@ For each grid:
   degrees the wind is blowing *from*, 0=N/90=E/180=S/270=W) are (re)computed
   from the filtered ``u``/``v`` so they stay consistent with the smoothed
   wind field.
+* For paired ``_0``/``_1`` grids, ``w`` is masked to NaN wherever
+  ``corrected_velocity_unravel`` (the doppler velocity field the retrieval
+  uses to weight observations) is not finite in *both* radars' grids, since
+  ``w`` there is unconstrained by dual-doppler data.
 * Only ``reflectivity``, ``u``, ``v``, ``w``, ``spd``, and ``dir`` are kept;
   every other variable (HRRR fields, radar moments, point geometry, etc.) is
   dropped.
@@ -55,6 +59,8 @@ from animate_reflectivity_quivers import draw_frame, _HAVE_CARTOPY, ccrs, SITES
 GRID_INDEX_RE = re.compile(r'^(.*)_(\d+)\.nc$')
 
 KEEP_VARS = ('reflectivity', 'u', 'v', 'w', 'spd', 'dir')
+
+DOPPLER_VEL_VAR = 'corrected_velocity_unravel'
 
 
 def lowpass_field(field, sigma):
@@ -126,6 +132,21 @@ def merge_max_reflectivity(processed_grids):
     merged['reflectivity'] = refl_stack.max(dim='_grid', skipna=True)
     merged['reflectivity'].attrs = attrs
     return merged
+
+
+def mask_missing_doppler(ds, raw_grids, vel_name=DOPPLER_VEL_VAR):
+    """Return a copy of ``ds`` with ``w`` masked to NaN wherever ``vel_name``
+    is not finite in every one of ``raw_grids`` (the un-postprocessed,
+    per-radar grids the retrieval was run on), i.e. keep ``w`` only where
+    every radar contributed a valid doppler velocity at that point.
+    """
+    valid = np.logical_and.reduce(
+        [np.isfinite(g[vel_name].values) for g in raw_grids])
+    ds = ds.copy()
+    attrs = ds['w'].attrs
+    ds['w'] = ds['w'].where(valid)
+    ds['w'].attrs = attrs
+    return ds
 
 
 def save_quicklook(ds, out_path, level, vmin, vmax, cmap, quiver_spacing_km,
@@ -442,11 +463,14 @@ if __name__ == '__main__':
     for key in order:
         idx_map = groups[key]
         if set(idx_map) == {0, 1}:
-            processed_grids = []
+            raw_grids = []
             for idx in (0, 1):
                 with xr.open_dataset(idx_map[idx]) as ds:
-                    processed_grids.append(postprocess_grid(ds, sigma=args.sigma).load())
+                    raw_grids.append(ds.load())
+            processed_grids = [postprocess_grid(ds, sigma=args.sigma)
+                               for ds in raw_grids]
             merged = merge_max_reflectivity(processed_grids)
+            merged = mask_missing_doppler(merged, raw_grids)
             out_dir = args.output_dir or args.grid_dir
             out_path = os.path.join(out_dir, f"{key}.nc")
             merged.to_netcdf(out_path)
